@@ -16,28 +16,28 @@ import {ReentrancyAttacker} from "../poc/ReentrancyAttacker.sol";
 ///     forge test --match-test test_attackSucceeds -vvvv
 ///
 contract ReentrancyTest is Test {
-    EtherVault      public vulnerable;
+    EtherVault public vulnerable;
     EtherVaultFixed public fixed_;
     ReentrancyAttacker public attacker;
 
-    address public alice   = makeAddr("alice");    // innocent depositor
-    address public bob     = makeAddr("bob");      // another innocent depositor
-    address public hacker  = makeAddr("hacker");   // attacker EOA
+    address public alice = makeAddr("alice"); // innocent depositor
+    address public bob = makeAddr("bob"); // another innocent depositor
+    address public hacker = makeAddr("hacker"); // attacker EOA
 
     uint256 constant ALICE_DEPOSIT = 5 ether;
-    uint256 constant BOB_DEPOSIT   = 3 ether;
-    uint256 constant ATTACK_SEED   = 1 ether;
+    uint256 constant BOB_DEPOSIT = 3 ether;
+    uint256 constant ATTACK_SEED = 1 ether;
 
     // ─── Setup ───────────────────────────────────────────────────────────────
 
     function setUp() public {
         // Deploy contracts
         vulnerable = new EtherVault();
-        fixed_     = new EtherVaultFixed();
+        fixed_ = new EtherVaultFixed();
 
         // Give everyone ETH
-        vm.deal(alice,  10 ether);
-        vm.deal(bob,    10 ether);
+        vm.deal(alice, 10 ether);
+        vm.deal(bob, 10 ether);
         vm.deal(hacker, 10 ether);
 
         // Alice and Bob deposit into the vulnerable vault
@@ -57,8 +57,8 @@ contract ReentrancyTest is Test {
     /// @notice Deposits update balances correctly
     function test_depositUpdatesBalance() public view {
         assertEq(vulnerable.balances(alice), ALICE_DEPOSIT, "Alice balance wrong");
-        assertEq(vulnerable.balances(bob),   BOB_DEPOSIT,   "Bob balance wrong");
-        assertEq(vulnerable.totalLocked(),   ALICE_DEPOSIT + BOB_DEPOSIT);
+        assertEq(vulnerable.balances(bob), BOB_DEPOSIT, "Bob balance wrong");
+        assertEq(vulnerable.totalLocked(), ALICE_DEPOSIT + BOB_DEPOSIT);
     }
 
     /// @notice Alice can withdraw her own funds
@@ -103,7 +103,7 @@ contract ReentrancyTest is Test {
         attacker.attack();
         vm.stopPrank();
 
-        uint256 vaultAfterAttack    = address(vulnerable).balance;
+        uint256 vaultAfterAttack = address(vulnerable).balance;
         uint256 attackerAfterAttack = address(attacker).balance;
 
         console2.log("\n=== AFTER ATTACK ===");
@@ -144,7 +144,7 @@ contract ReentrancyTest is Test {
         // If vault has less than alice's balance, her withdrawal will fail
         if (vaultRemainingBalance < aliceRecordedBalance) {
             vm.prank(alice);
-            vm.expectRevert();   // ETH transfer will fail — vault is empty
+            vm.expectRevert(); // ETH transfer will fail — vault is empty
             vulnerable.withdraw();
             console2.log("CONFIRMED: Alice's withdrawal REVERTED — she lost her funds!");
         }
@@ -196,7 +196,7 @@ contract ReentrancyTest is Test {
         vm.prank(alice);
         fixed_.withdraw();
 
-        assertEq(alice.balance,     aliceBefore + ALICE_DEPOSIT, "Alice got wrong amount");
+        assertEq(alice.balance, aliceBefore + ALICE_DEPOSIT, "Alice got wrong amount");
         assertEq(fixed_.balances(alice), 0, "Alice balance not zeroed");
         assertEq(address(fixed_).balance, vaultBefore - ALICE_DEPOSIT, "Vault drained incorrectly");
 
