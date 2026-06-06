@@ -1,0 +1,1408 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Reentrancy Trap — A Security Researcher's Deep Dive</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=JetBrains+Mono:ital,wght@0,400;0,600;1,400&family=Instrument+Serif:ital@0;1&display=swap"
+        rel="stylesheet">
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --bg: #0a0a0f;
+            --surface: #111118;
+            --surface2: #1a1a24;
+            --border: rgba(255, 255, 255, 0.07);
+            --border-bright: rgba(255, 255, 255, 0.15);
+            --red: #ff3f3f;
+            --red-dim: rgba(255, 63, 63, 0.12);
+            --red-mid: rgba(255, 63, 63, 0.25);
+            --green: #2dff8c;
+            --green-dim: rgba(45, 255, 140, 0.1);
+            --amber: #ffb340;
+            --amber-dim: rgba(255, 179, 64, 0.1);
+            --blue: #4d9fff;
+            --blue-dim: rgba(77, 159, 255, 0.1);
+            --text: #e8e8f0;
+            --muted: #7a7a8c;
+            --accent: #a855f7;
+            --accent-dim: rgba(168, 85, 247, 0.12);
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Instrument Serif', Georgia, serif;
+            font-size: 19px;
+            line-height: 1.75;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ── SCANLINE TEXTURE ── */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: repeating-linear-gradient(0deg,
+                    transparent,
+                    transparent 2px,
+                    rgba(0, 0, 0, 0.03) 2px,
+                    rgba(0, 0, 0, 0.03) 4px);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* ── HERO ── */
+        .hero {
+            position: relative;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            padding: 4rem 6vw 5rem;
+            overflow: hidden;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .hero-grid {
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(255, 63, 63, 0.04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 63, 63, 0.04) 1px, transparent 1px);
+            background-size: 60px 60px;
+            mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 30%, transparent 100%);
+        }
+
+        .hero-glare {
+            position: absolute;
+            top: -20%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 500px;
+            background: radial-gradient(ellipse, rgba(255, 63, 63, 0.07) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .hero-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.2em;
+            color: var(--red);
+            text-transform: uppercase;
+            margin-bottom: 1.5rem;
+            opacity: 0.9;
+        }
+
+        .hero-label::before {
+            content: '// ';
+            opacity: 0.4;
+        }
+
+        .hero h1 {
+            font-family: 'Syne', sans-serif;
+            font-size: clamp(3rem, 8vw, 7.5rem);
+            font-weight: 800;
+            line-height: 0.92;
+            letter-spacing: -0.03em;
+            color: #fff;
+            max-width: 900px;
+            margin-bottom: 2rem;
+        }
+
+        .hero h1 span {
+            color: var(--red);
+            display: block;
+        }
+
+        .hero-meta {
+            display: flex;
+            align-items: center;
+            gap: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .hero-author {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .avatar {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent), var(--red));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            font-size: 15px;
+            color: white;
+            flex-shrink: 0;
+        }
+
+        .author-info {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        .author-info strong {
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .author-info span {
+            color: var(--muted);
+        }
+
+        .hero-tags {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .tag {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            letter-spacing: 0.1em;
+            padding: 4px 10px;
+            border-radius: 2px;
+            border: 1px solid;
+            text-transform: uppercase;
+        }
+
+        .tag-red {
+            border-color: rgba(255, 63, 63, 0.4);
+            color: var(--red);
+            background: var(--red-dim);
+        }
+
+        .tag-green {
+            border-color: rgba(45, 255, 140, 0.3);
+            color: var(--green);
+            background: var(--green-dim);
+        }
+
+        .tag-amber {
+            border-color: rgba(255, 179, 64, 0.3);
+            color: var(--amber);
+            background: var(--amber-dim);
+        }
+
+        .tag-blue {
+            border-color: rgba(77, 159, 255, 0.3);
+            color: var(--blue);
+            background: var(--blue-dim);
+        }
+
+        .tag-purple {
+            border-color: rgba(168, 85, 247, 0.3);
+            color: var(--accent);
+            background: var(--accent-dim);
+        }
+
+        /* ── LAYOUT ── */
+        .container {
+            max-width: 860px;
+            margin: 0 auto;
+            padding: 0 6vw;
+        }
+
+        .wide-container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 6vw;
+        }
+
+        section {
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ── TYPOGRAPHY ── */
+        p {
+            margin-bottom: 1.5rem;
+        }
+
+        .lead {
+            font-size: 1.3rem;
+            color: rgba(232, 232, 240, 0.85);
+            font-style: italic;
+            border-left: 3px solid var(--red);
+            padding-left: 1.5rem;
+            margin: 3rem 0;
+            line-height: 1.6;
+        }
+
+        h2 {
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            font-size: 2.5rem;
+            color: #fff;
+            letter-spacing: -0.02em;
+            margin: 4rem 0 1.5rem;
+            line-height: 1.1;
+        }
+
+        h3 {
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 1.4rem;
+            color: #fff;
+            letter-spacing: -0.01em;
+            margin: 3rem 0 1rem;
+        }
+
+        a {
+            color: var(--blue);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        /* ── SECTION DIVIDER ── */
+        .section-rule {
+            padding: 5rem 0 0;
+            border-top: 1px solid var(--border);
+            margin-top: 5rem;
+        }
+
+        .section-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            letter-spacing: 0.25em;
+            color: var(--muted);
+            text-transform: uppercase;
+            margin-bottom: 0.5rem;
+        }
+
+        /* ── CODE BLOCKS ── */
+        pre {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            margin: 2rem 0;
+            position: relative;
+        }
+
+        pre .file-label {
+            position: absolute;
+            top: 0;
+            right: 0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--muted);
+            background: var(--surface2);
+            padding: 4px 10px;
+            border-bottom-left-radius: 4px;
+            border-left: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+        }
+
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.82em;
+            line-height: 1.7;
+        }
+
+        p>code,
+        li>code {
+            background: rgba(255, 255, 255, 0.07);
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.85em;
+            color: #d0d0e8;
+        }
+
+        .code-bad {
+            border-left: 3px solid var(--red);
+        }
+
+        .code-good {
+            border-left: 3px solid var(--green);
+        }
+
+        .code-note {
+            border-left: 3px solid var(--amber);
+        }
+
+        /* syntax colors */
+        .kw {
+            color: #ff79c6;
+        }
+
+        .fn {
+            color: #50fa7b;
+        }
+
+        .type {
+            color: #8be9fd;
+        }
+
+        .str {
+            color: #f1fa8c;
+        }
+
+        .cmt {
+            color: #6272a4;
+            font-style: italic;
+        }
+
+        .num {
+            color: #bd93f9;
+        }
+
+        .bad {
+            color: var(--red);
+            font-weight: 600;
+        }
+
+        .good {
+            color: var(--green);
+            font-weight: 600;
+        }
+
+        .hi {
+            background: rgba(255, 63, 63, 0.15);
+            border-radius: 2px;
+            padding: 1px 0;
+        }
+
+        .hi-g {
+            background: rgba(45, 255, 140, 0.1);
+            border-radius: 2px;
+            padding: 1px 0;
+        }
+
+        /* ── CALLOUT BOXES ── */
+        .callout {
+            border-radius: 4px;
+            padding: 1.25rem 1.5rem;
+            margin: 2rem 0;
+            border: 1px solid;
+            font-size: 0.95rem;
+        }
+
+        .callout-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            display: block;
+        }
+
+        .callout-danger {
+            background: var(--red-dim);
+            border-color: rgba(255, 63, 63, 0.3);
+        }
+
+        .callout-danger .callout-label {
+            color: var(--red);
+        }
+
+        .callout-success {
+            background: var(--green-dim);
+            border-color: rgba(45, 255, 140, 0.3);
+        }
+
+        .callout-success .callout-label {
+            color: var(--green);
+        }
+
+        .callout-info {
+            background: var(--blue-dim);
+            border-color: rgba(77, 159, 255, 0.3);
+        }
+
+        .callout-info .callout-label {
+            color: var(--blue);
+        }
+
+        .callout-warning {
+            background: var(--amber-dim);
+            border-color: rgba(255, 179, 64, 0.3);
+        }
+
+        .callout-warning .callout-label {
+            color: var(--amber);
+        }
+
+        /* ── EXECUTION TRACE DIAGRAM ── */
+        .trace {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2rem;
+            margin: 2rem 0;
+            overflow-x: auto;
+        }
+
+        .trace-title {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.15em;
+            color: var(--muted);
+            text-transform: uppercase;
+            margin-bottom: 1.5rem;
+        }
+
+        .trace-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+            margin-bottom: 0.5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+        }
+
+        .trace-num {
+            color: var(--muted);
+            min-width: 24px;
+            flex-shrink: 0;
+        }
+
+        .trace-arrow {
+            color: var(--muted);
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        .trace-bad {
+            color: var(--red);
+        }
+
+        .trace-good {
+            color: var(--green);
+        }
+
+        .trace-note {
+            color: var(--amber);
+        }
+
+        .trace-loop {
+            margin-left: 2rem;
+            padding-left: 1rem;
+            border-left: 2px solid rgba(255, 63, 63, 0.4);
+            margin-top: 4px;
+        }
+
+        /* ── COMPARISON GRID ── */
+        .compare-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin: 2rem 0;
+        }
+
+        @media (max-width: 700px) {
+            .compare-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .hero h1 {
+                font-size: 3rem;
+            }
+
+            .hero {
+                padding: 3rem 5vw 4rem;
+            }
+
+            .container,
+            .wide-container {
+                padding: 0 5vw;
+            }
+        }
+
+        .compare-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1.5rem;
+        }
+
+        .compare-card h4 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .compare-bad h4 {
+            color: var(--red);
+            border-bottom-color: rgba(255, 63, 63, 0.2);
+        }
+
+        .compare-good h4 {
+            color: var(--green);
+            border-bottom-color: rgba(45, 255, 140, 0.2);
+        }
+
+        /* ── REAL-WORLD TABLE ── */
+        .rw-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12.5px;
+            margin: 2rem 0;
+        }
+
+        .rw-table th {
+            text-align: left;
+            padding: 10px 14px;
+            color: var(--muted);
+            border-bottom: 1px solid var(--border-bright);
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: 10px;
+        }
+
+        .rw-table td {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            color: var(--text);
+            vertical-align: top;
+        }
+
+        .rw-table tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .loss-cell {
+            color: var(--red);
+            font-weight: 600;
+        }
+
+        /* ── ANATOMY VISUAL ── */
+        .anatomy {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2rem;
+            margin: 2.5rem 0;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .anatomy::before {
+            content: 'CALL STACK';
+            position: absolute;
+            top: 1rem;
+            right: 1.5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            letter-spacing: 0.2em;
+            color: var(--muted);
+            opacity: 0.5;
+        }
+
+        .stack-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 12px 16px;
+            border-radius: 3px;
+            margin-bottom: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            border: 1px solid;
+            position: relative;
+        }
+
+        .stack-item::after {
+            content: '';
+            position: absolute;
+            left: 50%;
+            bottom: -7px;
+            transform: translateX(-50%);
+            width: 1px;
+            height: 6px;
+            background: var(--border-bright);
+        }
+
+        .stack-item:last-child::after {
+            display: none;
+        }
+
+        .stack-normal {
+            background: rgba(77, 159, 255, 0.08);
+            border-color: rgba(77, 159, 255, 0.2);
+            color: var(--blue);
+        }
+
+        .stack-attack {
+            background: rgba(255, 63, 63, 0.1);
+            border-color: rgba(255, 63, 63, 0.3);
+            color: var(--red);
+        }
+
+        .stack-reenter {
+            background: rgba(255, 63, 63, 0.05);
+            border-color: rgba(255, 63, 63, 0.15);
+            color: rgba(255, 63, 63, 0.7);
+            margin-left: 2rem;
+        }
+
+        .stack-badge {
+            background: rgba(255, 255, 255, 0.08);
+            padding: 2px 8px;
+            border-radius: 2px;
+            font-size: 10px;
+            color: var(--muted);
+            margin-left: auto;
+            white-space: nowrap;
+        }
+
+        /* ── METRICS ROW ── */
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+            margin: 3rem 0;
+        }
+
+        @media (max-width: 700px) {
+            .metrics {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        .metric-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1.25rem;
+            text-align: center;
+        }
+
+        .metric-val {
+            font-family: 'Syne', sans-serif;
+            font-size: 1.8rem;
+            font-weight: 800;
+            color: #fff;
+            display: block;
+            line-height: 1;
+            margin-bottom: 0.4rem;
+        }
+
+        .metric-val.red {
+            color: var(--red);
+        }
+
+        .metric-val.green {
+            color: var(--green);
+        }
+
+        .metric-val.amber {
+            color: var(--amber);
+        }
+
+        .metric-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            letter-spacing: 0.1em;
+            color: var(--muted);
+            text-transform: uppercase;
+        }
+
+        /* ── PULL QUOTE ── */
+        blockquote {
+            font-size: 1.6rem;
+            font-style: italic;
+            color: rgba(232, 232, 240, 0.7);
+            margin: 4rem 0;
+            padding: 2rem 0 2rem 2rem;
+            border-left: 3px solid var(--accent);
+            line-height: 1.45;
+        }
+
+        blockquote cite {
+            display: block;
+            font-size: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-style: normal;
+            color: var(--muted);
+            margin-top: 1rem;
+            letter-spacing: 0.05em;
+        }
+
+        /* ── FOOTER ── */
+        footer {
+            border-top: 1px solid var(--border);
+            margin-top: 6rem;
+            padding: 4rem 6vw;
+            text-align: center;
+        }
+
+        footer p {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--muted);
+            margin-bottom: 0.5rem;
+        }
+
+        /* ── SCROLL ANIMATIONS ── */
+        .reveal {
+            opacity: 0;
+            transform: translateY(24px);
+            transition: opacity 0.6s ease, transform 0.6s ease;
+        }
+
+        .reveal.visible {
+            opacity: 1;
+            transform: none;
+        }
+
+        /* ── NAV ── */
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 6vw;
+            background: rgba(10, 10, 15, 0.85);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+        }
+
+        nav .nav-brand {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--red);
+            letter-spacing: 0.1em;
+        }
+
+        nav .nav-links {
+            display: flex;
+            gap: 2rem;
+            list-style: none;
+        }
+
+        nav .nav-links a {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            letter-spacing: 0.1em;
+            color: var(--muted);
+            text-transform: uppercase;
+            transition: color 0.2s;
+        }
+
+        nav .nav-links a:hover {
+            color: var(--text);
+            text-decoration: none;
+        }
+
+        /* ── PROGRESS BAR ── */
+        .progress-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 2px;
+            background: var(--red);
+            z-index: 200;
+            transition: width 0.1s;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="progress-bar" id="progress"></div>
+
+    <nav>
+        <span class="nav-brand">// security.research</span>
+        <ul class="nav-links">
+            <li><a href="#the-bug">The Bug</a></li>
+            <li><a href="#anatomy">Anatomy</a></li>
+            <li><a href="#real-world">Real-World</a></li>
+            <li><a href="#fix">The Fix</a></li>
+            <li><a href="#lab">Lab</a></li>
+        </ul>
+    </nav>
+
+    <!-- ═══════════════════════════════════════════════════════════════ HERO -->
+    <section class="hero">
+        <div class="hero-grid"></div>
+        <div class="hero-glare"></div>
+        <div class="hero-label">Smart Contract Vulnerability Research · 2025</div>
+        <h1>
+            The<br>
+            Reentrancy
+            <span>Trap</span>
+        </h1>
+        <div class="hero-meta">
+            <div class="hero-author">
+                <div class="avatar">SR</div>
+                <div class="author-info">
+                    <strong>Security Researcher</strong><br>
+                    <span>Smart Contract Auditor</span>
+                </div>
+            </div>
+            <div class="hero-tags">
+                <span class="tag tag-red">Critical Severity</span>
+                <span class="tag tag-blue">Solidity</span>
+                <span class="tag tag-green">PoC Included</span>
+                <span class="tag tag-amber">Foundry Tests</span>
+                <span class="tag tag-purple">Deep Dive</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ INTRO -->
+    <section style="padding-top: 5rem; padding-bottom: 2rem;">
+        <div class="container">
+
+            <p class="lead reveal">
+                Reentrancy is not just a bug — it is a consequence of trusting the call stack. When a Solidity contract
+                sends ETH and waits for a response, it hands control to an entity that may not deserve it. This post is
+                a surgical dissection of that trust failure.
+            </p>
+
+            <div class="metrics reveal">
+                <div class="metric-card">
+                    <span class="metric-val red">$60M</span>
+                    <span class="metric-label">The DAO (2016)</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-val red">$25M</span>
+                    <span class="metric-label">Lendf.Me (2020)</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-val red">$18.8M</span>
+                    <span class="metric-label">Cream Finance (2021)</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-val amber">~8yr</span>
+                    <span class="metric-label">Still discovered today</span>
+                </div>
+            </div>
+
+            <p class="reveal">The numbers tell one story. The code tells a much more interesting one. Let me show you
+                what's actually happening at the EVM level when a reentrancy attack fires — and more importantly,
+                <em>why</em> the naive mental model of smart contract execution leads developers straight into this
+                trap.</p>
+
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ THE BUG -->
+    <section id="the-bug" class="section-rule">
+        <div class="container">
+            <div class="section-label">Section 01</div>
+            <h2 class="reveal">The Vulnerable Pattern</h2>
+
+            <p class="reveal">Start with the most common manifestation — an ETH withdrawal function. At first glance it
+                looks completely reasonable. There's a balance check, a transfer, and a state cleanup. The logic seems
+                sound.</p>
+
+            <p class="reveal">Then you read it again, this time tracing the <em>actual execution order</em>:</p>
+
+            <pre class="code-bad reveal"><span class="file-label">EtherVault.sol</span><code><span class="cmt">// ❌ VULNERABLE — classic reentrancy setup</span>
+<span class="kw">function</span> <span class="fn">withdraw</span>() <span class="kw">external</span> {
+    <span class="type">uint256</span> amount = balances[msg.sender];
+    <span class="kw">require</span>(amount > <span class="num">0</span>, <span class="str">"Nothing to withdraw"</span>);
+
+    <span class="hi cmt">// ← Step 2: External call — EVM pauses HERE and gives</span>
+    <span class="hi cmt">//           control to msg.sender's code</span>
+    <span class="hi">(<span class="type">bool</span> success, ) = msg.sender.call{<span class="kw">value</span>: amount}(<span class="str">""</span>);</span>
+    <span class="kw">require</span>(success, <span class="str">"ETH transfer failed"</span>);
+
+    <span class="bad">// ← Step 3: This runs AFTER the attacker's fallback returns</span>
+    <span class="bad">//           But by then, withdraw() has already been called again!</span>
+    <span class="bad">balances[msg.sender] = <span class="num">0</span>;</span>
+}</code></pre>
+
+            <p class="reveal">The developer's mental model: <em>"I check the balance, I send the ETH, then I zero the
+                    balance."</em></p>
+
+            <p class="reveal">The EVM's reality: <em>"I check the balance, I suspend execution, I give you control, you
+                    call withdraw() again while the balance is still non-zero, you call it again, you call it again…
+                    then eventually I zero the balance once for the outermost call."</em></p>
+
+            <div class="callout callout-danger reveal">
+                <span class="callout-label">⚠ Root Cause</span>
+                The Solidity <code>.call()</code> opcode — unlike <code>transfer()</code> — forwards all available gas
+                to the recipient. If the recipient is a contract, that gas is more than enough to execute a full
+                re-entrant call back into your function before you've updated your state.
+            </div>
+
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ ANATOMY -->
+    <section id="anatomy" class="section-rule">
+        <div class="container">
+            <div class="section-label">Section 02</div>
+            <h2 class="reveal">Dissecting the Attack</h2>
+
+            <p class="reveal">Let's trace through a concrete attack. Alice deposited 5 ETH. Bob deposited 3 ETH. The
+                vault holds 8 ETH total. The attacker deposits 1 ETH to appear legitimate — bringing the vault to 9 ETH.
+                Here's what happens next, frame by frame:</p>
+
+            <div class="trace reveal">
+                <div class="trace-title">Execution trace — reentrancy loop</div>
+
+                <div class="trace-row">
+                    <span class="trace-num">1.</span>
+                    <span class="trace-arrow">→</span>
+                    <span>Attacker calls <code>vault.withdraw()</code> | vault.balance = 9 ETH | attacker recorded
+                        balance = 1 ETH</span>
+                </div>
+                <div class="trace-row">
+                    <span class="trace-num">2.</span>
+                    <span class="trace-arrow">→</span>
+                    <span><code>require(1 ETH > 0)</code> ✓ — guard passes</span>
+                </div>
+                <div class="trace-row">
+                    <span class="trace-num">3.</span>
+                    <span class="trace-arrow">→</span>
+                    <span class="trace-bad"><code>msg.sender.call{value: 1 ETH}("")</code> — EVM sends 1 ETH and
+                        <strong>suspends vault execution</strong></span>
+                </div>
+                <div class="trace-row">
+                    <span class="trace-num"> </span>
+                    <span class="trace-arrow"> </span>
+                    <div class="trace-loop">
+                        <div class="trace-row" style="margin-bottom:4px;">
+                            <span class="trace-arrow" style="color:var(--red)">↪</span>
+                            <span class="trace-bad"><strong>Attacker's receive() fires</strong> | vault.balance = 8 ETH
+                                | attacker balance STILL = 1 ETH</span>
+                        </div>
+                        <div class="trace-row" style="margin-bottom:4px;">
+                            <span class="trace-arrow" style="color:var(--red)">↪</span>
+                            <span class="trace-bad">Re-enters <code>vault.withdraw()</code> | guard passes again
+                                (balance not zeroed!)</span>
+                        </div>
+                        <div class="trace-row" style="margin-bottom:4px;">
+                            <span class="trace-arrow" style="color:var(--red)">↪</span>
+                            <span class="trace-bad">Sends 1 ETH again | vault.balance = 7 ETH | suspends again…</span>
+                        </div>
+                        <div class="trace-row" style="margin-bottom:4px;">
+                            <span class="trace-arrow" style="color:var(--red)">↪</span>
+                            <span class="trace-note">Loop repeats… 8 ETH, 7 ETH, 6 ETH, 5 ETH, 4 ETH, 3 ETH, 2 ETH, 1
+                                ETH</span>
+                        </div>
+                        <div class="trace-row">
+                            <span class="trace-arrow" style="color:var(--muted)">↪</span>
+                            <span style="color:var(--muted)">vault.balance = 0 ETH — loop exits (condition fails)</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="trace-row">
+                    <span class="trace-num">4.</span>
+                    <span class="trace-arrow">→</span>
+                    <span>All nested calls unwind — <code>balances[attacker] = 0</code> runs 9 times… all on an
+                        already-zero value</span>
+                </div>
+                <div class="trace-row">
+                    <span class="trace-num">5.</span>
+                    <span class="trace-arrow">→</span>
+                    <span class="trace-bad"><strong>Result:</strong> Attacker holds 9 ETH. Vault holds 0. Alice and Bob
+                        lost everything.</span>
+                </div>
+            </div>
+
+            <p class="reveal">Notice the key insight: the state write (<code>balances[attacker] = 0</code>) is the last
+                thing in the function. The EVM will faithfully execute it — but by then, it's too late. The attacker has
+                already re-entered the function 9 times with a non-zero balance each time.</p>
+
+            <h3 class="reveal">The Attacker Contract</h3>
+            <p class="reveal">Here's the exploit contract. It's elegantly minimal. The payload is three lines in
+                <code>receive()</code>:</p>
+
+            <pre class="code-bad reveal"><span class="file-label">ReentrancyAttacker.sol</span><code><span class="kw">contract</span> <span class="type">ReentrancyAttacker</span> {
+    <span class="type">EtherVault</span> <span class="kw">public immutable</span> vault;
+    <span class="type">address</span> <span class="kw">public immutable</span> owner;
+
+    <span class="kw">function</span> <span class="fn">attack</span>() <span class="kw">external</span> {
+        <span class="kw">require</span>(msg.sender == owner, <span class="str">"Only owner"</span>);
+        vault.withdraw(); <span class="cmt">// ← kicks off the loop</span>
+    }
+
+    <span class="cmt">// This is the payload — triggered every time vault sends ETH</span>
+    <span class="hi"><span class="kw">receive</span>() <span class="kw">external payable</span> {
+        <span class="kw">if</span> (address(vault).balance >= <span class="num">1 ether</span>) {
+            vault.withdraw(); <span class="cmt">// ← re-enters before balance is zeroed</span>
+        }
+    }</span>
+}</code></pre>
+
+            <div class="callout callout-info reveal">
+                <span class="callout-label">💡 Why .call() and not .transfer()?</span>
+                The original EVM transfer opcodes — <code>transfer()</code> and <code>send()</code> — cap forwarded gas
+                at 2,300 units. That's enough for a log emit but not enough for a storage write, making reentrancy
+                impossible. But the ecosystem moved to <code>.call()</code> because <code>transfer()</code> became
+                unreliable after EIP-1884 raised <code>SLOAD</code> costs. The community traded one risk for another.
+            </div>
+
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ REAL-WORLD -->
+    <section id="real-world" class="section-rule">
+        <div class="container">
+            <div class="section-label">Section 03</div>
+            <h2 class="reveal">From Classroom to Chain</h2>
+
+            <p class="reveal">Reentrancy is not theoretical. Every entry in this table is a real protocol where this
+                conceptual failure became millions of dollars of stolen funds.</p>
+
+            <div class="reveal" style="overflow-x: auto;">
+                <table class="rw-table">
+                    <thead>
+                        <tr>
+                            <th>Protocol</th>
+                            <th>Year</th>
+                            <th>Loss</th>
+                            <th>Vulnerable Surface</th>
+                            <th>Root Cause (condensed)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>The DAO</strong></td>
+                            <td>2016</td>
+                            <td class="loss-cell">~$60M</td>
+                            <td><code>splitDAO()</code></td>
+                            <td>Reward sent via recursive call before internal token balance zeroed. Led to ETH hard
+                                fork.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>SpankChain</strong></td>
+                            <td>2018</td>
+                            <td class="loss-cell">$38K</td>
+                            <td>Payment channel</td>
+                            <td>Malicious ERC-20 used callback hook to re-enter <code>LCOpenTimeout()</code> before
+                                channel closed.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Lendf.Me</strong></td>
+                            <td>2020</td>
+                            <td class="loss-cell">$25M</td>
+                            <td><code>supply()</code> / <code>withdraw()</code></td>
+                            <td>ERC-777 token's <code>tokensToSend</code> hook fired before internal accounting updated.
+                                Classic cross-standard reentrancy.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Cream Finance</strong></td>
+                            <td>2021</td>
+                            <td class="loss-cell">$18.8M</td>
+                            <td>Flash loan callback</td>
+                            <td>Flash loan callback called <code>borrow()</code> again before <code>totalBorrows</code>
+                                was updated. Cross-function reentrancy.</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Reentrancy (read-only)</strong></td>
+                            <td>2022+</td>
+                            <td class="loss-cell">Various</td>
+                            <td>Oracle price reads</td>
+                            <td>Protocol reads price from Curve/Balancer mid-execution while those pools are in
+                                transient state. View function reentrancy — no mutex helps.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <blockquote class="reveal">
+                "The DAO attack did not require sophisticated cryptography. It required reading the source code and
+                understanding that <code>balances[msg.sender] -= amount</code> came after the ETH send."
+                <cite>— Post-mortem analysis, 2016</cite>
+            </blockquote>
+
+            <h3 class="reveal">The Lendf.Me Case: ERC-777 Reentrancy</h3>
+            <p class="reveal">This one is particularly instructive because it shows reentrancy can arrive via token
+                standards, not just direct ETH sends. ERC-777 tokens define a <code>tokensToSend</code> hook — a
+                callback that fires before a transfer completes. The Lendf.Me protocol didn't account for this:</p>
+
+            <pre class="code-bad reveal"><span class="file-label">Simplified Lendf.Me pattern (reconstructed)</span><code><span class="kw">function</span> <span class="fn">supply</span>(<span class="type">address</span> token, <span class="type">uint256</span> amount) <span class="kw">external</span> {
+    <span class="cmt">// ERC-777 transferFrom triggers tokensToSend hook</span>
+    <span class="cmt">// — attacker's hook calls withdraw() HERE</span>
+    <span class="cmt">// — accounting hasn't been updated yet</span>
+    <span class="hi">token.transferFrom(msg.sender, address(this), amount);</span>
+
+    <span class="bad">// ← Accounting runs AFTER the callback — too late</span>
+    <span class="bad">accountBalance[msg.sender] += amount;</span>
+}</code></pre>
+
+            <p class="reveal">The lesson: <strong>any external call</strong> is a potential reentrancy surface — not
+                just explicit ETH sends. Token transfers, oracle calls, NFT mints with callbacks, flash loan callbacks —
+                all of them hand temporary control to external code.</p>
+
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ THE FIX -->
+    <section id="fix" class="section-rule">
+        <div class="container">
+            <div class="section-label">Section 04</div>
+            <h2 class="reveal">Three Defences. One Correct Pattern.</h2>
+
+            <div class="compare-grid reveal">
+                <div class="compare-card compare-bad">
+                    <h4>❌ Vulnerable Order (Interact before Effect)</h4>
+                    <pre style="background:transparent; border:none; padding:0; margin:0;"><code style="font-size:12px;"><span class="num">1.</span> Check  → <span class="kw">require</span>(balance > <span class="num">0</span>)
+<span class="num">2.</span> <span class="bad">Interact→ msg.sender.call{...}()</span>
+<span class="num">3.</span> <span class="bad">Effect  → balances[x] = 0</span>
+
+<span class="cmt">// Attacker re-enters at step 2
+// Balance still non-zero at step 1
+// Drains vault in a loop</span></code></pre>
+                </div>
+                <div class="compare-card compare-good">
+                    <h4>✅ Safe Order (CEI Pattern)</h4>
+                    <pre style="background:transparent; border:none; padding:0; margin:0;"><code style="font-size:12px;"><span class="num">1.</span> Check  → <span class="kw">require</span>(balance > <span class="num">0</span>)
+<span class="num">2.</span> <span class="good">Effect  → balances[x] = 0</span>
+<span class="num">3.</span> <span class="good">Interact→ msg.sender.call{...}()</span>
+
+<span class="cmt">// Re-entry now harmless:
+// balance is already 0
+// guard fails immediately</span></code></pre>
+                </div>
+            </div>
+
+            <h3 class="reveal">Defence 1: Checks-Effects-Interactions (CEI)</h3>
+            <p class="reveal">This is the architectural fix. It's not a library — it's a discipline. Always perform all
+                state changes before any external calls. If a re-entrant call comes in, the state will already be
+                consistent and guards will fail naturally.</p>
+
+            <pre class="code-good reveal"><span class="file-label">EtherVaultFixed.sol — CEI pattern</span><code><span class="kw">function</span> <span class="fn">withdraw</span>() <span class="kw">external</span> nonReentrant {
+    <span class="type">uint256</span> amount = balances[msg.sender];
+
+    <span class="cmt">// ✅ CHECK — validate state</span>
+    <span class="kw">require</span>(amount > <span class="num">0</span>, <span class="str">"Nothing to withdraw"</span>);
+
+    <span class="hi-g cmt">// ✅ EFFECT — update state first</span>
+    <span class="hi-g">balances[msg.sender] = <span class="num">0</span>;</span>
+
+    <span class="cmt">// ✅ INTERACT — external call comes last</span>
+    (<span class="type">bool</span> success, ) = msg.sender.call{<span class="kw">value</span>: amount}(<span class="str">""</span>);
+    <span class="kw">require</span>(success, <span class="str">"ETH transfer failed"</span>);
+
+    <span class="kw">emit</span> <span class="fn">Withdrawn</span>(msg.sender, amount);
+}</code></pre>
+
+            <p class="reveal">Now if the attacker tries to re-enter: their balance was already zeroed. The
+                <code>require(amount > 0)</code> check fails. Attack over.</p>
+
+            <h3 class="reveal">Defence 2: ReentrancyGuard Mutex</h3>
+            <p class="reveal">OpenZeppelin's <code>ReentrancyGuard</code> adds a boolean mutex that gets locked at the
+                start of any <code>nonReentrant</code> function and unlocked at the end. A re-entrant call hits the
+                locked mutex and reverts immediately — before even checking balances.</p>
+
+            <pre class="code-good reveal"><span class="file-label">Using OpenZeppelin's guard</span><code><span class="kw">import</span> {ReentrancyGuard} <span class="kw">from</span> <span class="str">"@openzeppelin/contracts/security/ReentrancyGuard.sol"</span>;
+
+<span class="kw">contract</span> <span class="type">EtherVaultFixed</span> <span class="kw">is</span> <span class="type">ReentrancyGuard</span> {
+    <span class="kw">function</span> <span class="fn">withdraw</span>() <span class="kw">external</span> <span class="hi-g">nonReentrant</span> {
+        <span class="cmt">// If this function is re-entered, the mutex causes an
+        // immediate revert — attacker's receive() gets a failed call</span>
+        ...
+    }
+}</code></pre>
+
+            <div class="callout callout-warning reveal">
+                <span class="callout-label">⚠ Important Nuance</span>
+                <code>nonReentrant</code> only prevents re-entering functions within the same contract that also carry
+                the modifier. Cross-contract reentrancy and read-only reentrancy (calling <code>view</code> functions
+                mid-execution) can bypass it. CEI is the architectural foundation — the guard is the safety net, not the
+                solution.
+            </div>
+
+            <h3 class="reveal">Defence 3: Pull-over-Push Payments</h3>
+            <p class="reveal">Instead of the contract pushing ETH to users on withdrawal, let users pull their own ETH.
+                The contract stores withdrawal credits and users claim them separately. This isolates any callback risk
+                to the individual user, not the whole vault:</p>
+
+            <pre class="code-good reveal"><span class="file-label">Pull payment pattern</span><code><span class="cmt">// Instead of: msg.sender.call{value: amount}("")</span>
+<span class="cmt">// Do this:</span>
+
+<span class="type">mapping</span>(<span class="type">address</span> => <span class="type">uint256</span>) <span class="kw">public</span> pendingWithdrawals;
+
+<span class="kw">function</span> <span class="fn">initiateWithdraw</span>() <span class="kw">external</span> {
+    <span class="type">uint256</span> amount = balances[msg.sender];
+    <span class="kw">require</span>(amount > <span class="num">0</span>);
+    balances[msg.sender] = <span class="num">0</span>;
+    <span class="hi-g">pendingWithdrawals[msg.sender] += amount;</span> <span class="cmt">// credit, don't send</span>
+}
+
+<span class="kw">function</span> <span class="fn">claimWithdrawal</span>() <span class="kw">external</span> nonReentrant {
+    <span class="type">uint256</span> amount = pendingWithdrawals[msg.sender];
+    <span class="kw">require</span>(amount > <span class="num">0</span>);
+    pendingWithdrawals[msg.sender] = <span class="num">0</span>;
+    (<span class="type">bool</span> ok, ) = msg.sender.call{<span class="kw">value</span>: amount}(<span class="str">""</span>);
+    <span class="kw">require</span>(ok);
+}</code></pre>
+
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ LAB -->
+    <section id="lab" class="section-rule">
+        <div class="container">
+            <div class="section-label">Section 05</div>
+            <h2 class="reveal">The Foundry Test Suite</h2>
+
+            <p class="reveal">Theory is necessary. But the moment you watch a test output show a vault drain from 9 ETH
+                to 0, the vulnerability becomes visceral in a way no diagram can replicate. Here's what the Foundry test
+                suite proves:</p>
+
+            <pre class="code-note reveal"><span class="file-label">ReentrancyTest.t.sol — test_attackSucceeds (output)</span><code><span class="good">Running 1 test for test/ReentrancyTest.t.sol:ReentrancyTest</span>
+
+<span class="cmt">=== BEFORE ATTACK ===</span>
+  Vault balance:    <span class="num">8000000000000000000</span>  <span class="cmt">// 8 ETH (Alice + Bob)</span>
+  Attacker balance: <span class="num">0</span>
+  Hacker balance:   <span class="num">10000000000000000000</span>
+
+<span class="cmt">=== AFTER SEED ===</span>
+  Vault balance:    <span class="num">9000000000000000000</span>  <span class="cmt">// 9 ETH (+ attacker's 1 ETH)</span>
+
+<span class="cmt">=== AFTER ATTACK ===</span>
+  Vault balance:    <span class="bad">0</span>                     <span class="cmt">// ← completely drained</span>
+  Attacker balance: <span class="bad">9000000000000000000</span>  <span class="cmt">// ← stole all 9 ETH</span>
+
+<span class="cmt">=== VICTIM CHECK ===</span>
+  Alice recorded balance: <span class="num">5000000000000000000</span>  <span class="cmt">// Alice thinks she has 5 ETH</span>
+  But vault has only:     <span class="bad">0</span>                     <span class="cmt">// vault is empty</span>
+
+<span class="good">[PASS] test_attackSucceeds()</span></code></pre>
+
+            <div class="callout callout-success reveal">
+                <span class="callout-label">✅ Running the Lab</span>
+                <strong>Clone the repo → install → test:</strong><br><br>
+                <code>git clone https://github.com/YOUR_HANDLE/reentrancy-lab</code><br>
+                <code>cd reentrancy-lab</code><br>
+                <code>forge install OpenZeppelin/openzeppelin-contracts</code><br>
+                <code>forge test -vvvv</code>
+            </div>
+
+            <h3 class="reveal">The Fuzz Test: Proving the Invariant</h3>
+            <p class="reveal">The fuzz test is my favorite part of the suite. It runs 256 iterations with random deposit
+                amounts and asserts one invariant: <em>whatever you deposit, you always get back exactly that amount and
+                    nothing more</em>. The fixed vault passes all 256 runs. The vulnerable vault — if you wire it up —
+                fails the first time an attacker contract is simulated.</p>
+
+            <pre class="code-good reveal"><span class="file-label">Fuzz test — deposit/withdraw invariant</span><code><span class="kw">function</span> <span class="fn">test_fuzz_depositWithdrawInvariant</span>(<span class="type">uint96</span> amount) <span class="kw">public</span> {
+    vm.assume(amount > <span class="num">0</span> && amount <= <span class="num">5 ether</span>);
+
+    <span class="type">address</span> user = makeAddr(<span class="str">"fuzzer"</span>);
+    vm.deal(user, <span class="type">uint256</span>(amount));
+
+    vm.startPrank(user);
+    fixed_.deposit{<span class="kw">value</span>: amount}();
+    <span class="type">uint256</span> before = user.balance;
+    fixed_.withdraw();
+    <span class="hi-g">assertEq(user.balance, before + amount); <span class="cmt">// exact amount, always</span></span>
+    vm.stopPrank();
+}</code></pre>
+
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ SUMMARY -->
+    <section class="section-rule">
+        <div class="container">
+            <div class="section-label">Closing</div>
+            <h2 class="reveal">What to Take Away</h2>
+
+            <p class="reveal">Reentrancy persists not because developers are careless, but because the mental model of
+                smart contract execution is subtly wrong. We think of functions as atomic units. The EVM does not agree.
+                Every external call is a yield point — a moment where another agent gets control.</p>
+
+            <p class="reveal">After auditing contracts, I look for reentrancy anywhere I see:</p>
+
+            <div class="callout callout-info reveal">
+                <span class="callout-label">🔍 Audit Checklist — Reentrancy Risk Signals</span>
+                <ul
+                    style="list-style:none; padding:0; font-size:0.9rem; font-family: 'JetBrains Mono', monospace; margin-top:0.5rem;">
+                    <li style="padding: 4px 0;">→ <code>.call()</code> with arbitrary gas forwarding</li>
+                    <li style="padding: 4px 0;">→ ERC-777 / ERC-1155 token transfers (callback hooks)</li>
+                    <li style="padding: 4px 0;">→ Flash loan callbacks where state is not settled before the callback
+                    </li>
+                    <li style="padding: 4px 0;">→ NFT mint callbacks (ERC-721 <code>onERC721Received</code>)</li>
+                    <li style="padding: 4px 0;">→ Any function that reads-then-writes across an external call</li>
+                    <li style="padding: 4px 0;">→ Cross-contract calls where the callee can call back into the caller
+                    </li>
+                    <li style="padding: 4px 0;">→ <code>view</code> functions read mid-reentrancy (read-only reentrancy)
+                    </li>
+                </ul>
+            </div>
+
+            <p class="reveal">The fix is simple to state and requires discipline to apply consistently: <strong>Checks →
+                    Effects → Interactions</strong>. Never let an external call touch code where your state is still
+                stale. Add <code>nonReentrant</code> as a belt-and-suspenders guard for any function that moves funds.
+            </p>
+
+            <p class="reveal">The DAO lost 60 million dollars to this pattern in 2016. New contracts still get deployed
+                with this exact bug today. The gap is not knowledge — it's attention.</p>
+
+            <blockquote class="reveal">
+                "Code without an understanding of its execution environment is guesswork at scale."
+            </blockquote>
+
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════ FOOTER -->
+    <footer>
+        <p>Built as part of a smart contract security research portfolio.</p>
+        <p style="margin-top: 0.5rem;">
+            <span class="tag tag-green" style="display:inline-block; margin-right: 0.5rem;">GitHub Repo</span>
+            <span class="tag tag-blue" style="display:inline-block;">Foundry Tests Included</span>
+        </p>
+        <p style="margin-top: 1.5rem; font-size: 10px;">For educational purposes only. Do not deploy vulnerable
+            contracts.</p>
+    </footer>
+
+    <script>
+        // Progress bar
+        window.addEventListener('scroll', () => {
+            const scrolled = window.scrollY;
+            const total = document.body.scrollHeight - window.innerHeight;
+            document.getElementById('progress').style.width = (scrolled / total * 100) + '%';
+        });
+
+        // Scroll reveal
+        const reveals = document.querySelectorAll('.reveal');
+        const io = new IntersectionObserver((entries) => {
+            entries.forEach((e, i) => {
+                if (e.isIntersecting) {
+                    setTimeout(() => e.target.classList.add('visible'), i * 40);
+                    io.unobserve(e.target);
+                }
+            });
+        }, { threshold: 0.1, rootMargin: '0px 0px -50px 0px' });
+        reveals.forEach(el => io.observe(el));
+    </script>
+</body>
+
+</html>
